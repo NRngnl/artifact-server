@@ -101,6 +101,11 @@ export interface InstallationIdentityRepository {
     installationId: string,
     email: string,
   ) => Effect.Effect<InstallationMember | null, IdentityRepositoryFailure>;
+  /** Find a member by email regardless of active/inactive status. */
+  readonly findMemberByEmail: (
+    installationId: string,
+    email: string,
+  ) => Effect.Effect<InstallationMember | null, IdentityRepositoryFailure>;
   readonly findActiveMemberByExternalIdentity: (
     installationId: string,
     provider: string,
@@ -161,6 +166,12 @@ export interface IdentityIdProvider {
 }
 
 export interface InstallationAccessDependencies {
+  /**
+   * When true, verified OIDC users with no existing member record are
+   * automatically admitted with the 'member' role. A previously deactivated
+   * member is never re-admitted. Default false.
+   */
+  readonly autoAdmitExternalMembers?: boolean;
   /**
    * Bounded-staleness cache policy for successful session and managed-key
    * authentication, keyed by installation and credential digest. Omit it to
@@ -313,6 +324,10 @@ export class InstallationAccessService extends Context.Service<
     );
 }
 
+const notAdmitted = () => new IdentityAdmissionDenied({
+  message: "This person has not been admitted to the Artifact Server.",
+});
+
 function makeInstallationAccessService(
   dependencies: InstallationAccessDependencies,
 ): InstallationAccessOperations {
@@ -439,6 +454,36 @@ function makeInstallationAccessService(
     return yield* issueSession(member);
   });
 
+  const autoAdmitMember = Effect.fn(
+    "InstallationAccessService.autoAdmitMember",
+  )(function*(email: string, displayName: string) {
+    // Any existing record here is inactive; an admin deactivation must stick.
+    const existing = yield* dependencies.repository.findMemberByEmail(
+      dependencies.installationId,
+      email,
+    );
+    if (existing !== null) {
+      return yield* Effect.fail(notAdmitted());
+    }
+    return yield* dependencies.repository.admitMember({
+      createdAt: dependencies.clock.now().toISOString(),
+      displayName,
+      email,
+      id: dependencies.ids.memberId(),
+      installationId: dependencies.installationId,
+      role: membershipRoles.member,
+    }).pipe(
+      // Unique-email race: a concurrent login admitted this email first.
+      Effect.catchTag("IdentityConflict", () =>
+        dependencies.repository.findActiveMemberByEmail(
+          dependencies.installationId,
+          email,
+        ).pipe(Effect.flatMap((winner) =>
+          winner === null ? Effect.fail(notAdmitted()) : Effect.succeed(winner)
+        ))),
+    );
+  });
+
   const resolveExternalMember = Effect.fn(
     "InstallationAccessService.resolveExternalMember",
   )(function*(identity: ExternalIdentity) {
@@ -453,12 +498,11 @@ function makeInstallationAccessService(
       identity.provider,
       identity.subject,
     );
-    if (member === null) {
-      member = yield* dependencies.repository.findActiveMemberByEmail(
-        dependencies.installationId,
-        email,
-      );
-    }
+    if (member !== null) return member;
+    member = yield* dependencies.repository.findActiveMemberByEmail(
+      dependencies.installationId,
+      email,
+    );
     if (member === null) {
       const hasMembers = yield* dependencies.repository.hasMembers(
         dependencies.installationId,
@@ -466,22 +510,22 @@ function makeInstallationAccessService(
       const bootstrapAdministratorEmail = yield* normalizeEmail(
         dependencies.bootstrapAdministratorEmail,
       );
-      if (
-        hasMembers ||
-        email !== bootstrapAdministratorEmail
-      ) {
-        return yield* Effect.fail(new IdentityAdmissionDenied({
-          message: "This person has not been admitted to the Artifact Server.",
-        }));
+      const isBootstrapAdmin = !hasMembers &&
+        email === bootstrapAdministratorEmail;
+      if (isBootstrapAdmin) {
+        member = yield* dependencies.repository.admitMember({
+          createdAt: dependencies.clock.now().toISOString(),
+          displayName: identity.displayName,
+          email,
+          id: dependencies.ids.memberId(),
+          installationId: dependencies.installationId,
+          role: membershipRoles.administrator,
+        });
+      } else if (dependencies.autoAdmitExternalMembers) {
+        member = yield* autoAdmitMember(email, identity.displayName);
+      } else {
+        return yield* Effect.fail(notAdmitted());
       }
-      member = yield* dependencies.repository.admitMember({
-        createdAt: dependencies.clock.now().toISOString(),
-        displayName: identity.displayName,
-        email,
-        id: dependencies.ids.memberId(),
-        installationId: dependencies.installationId,
-        role: membershipRoles.administrator,
-      });
     }
     yield* dependencies.repository.bindExternalIdentity({
       boundAt: dependencies.clock.now().toISOString(),

@@ -310,7 +310,7 @@ describe("private content sessions", () => {
     );
     expect(missing.status).toBe(404);
     const forged = new URL(lease.baseUrl);
-    forged.hostname = `review-${"x".repeat(40)}.localhost`;
+    forged.hostname = `review-${"b".repeat(56)}.localhost`;
     expect((await fetchVersion(server, forged.toString())).status).toBe(401);
     const write = await fetchVersion(server, lease.baseUrl, "POST");
     expect(write.status).toBe(405);

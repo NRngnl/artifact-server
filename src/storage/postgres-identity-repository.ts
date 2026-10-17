@@ -187,6 +187,20 @@ export class PostgresIdentityRepository implements BootstrapManagedApiKeyReposit
     }));
   }
 
+  async findMemberByEmail(
+    installationId: string,
+    email: string,
+  ): Promise<InstallationMember | null> {
+    this.#assertInstallationScope(installationId);
+    return this.#database.run(Effect.gen({self: this}, function*() {
+      const sql = yield* SqlClient;
+      const rows = yield* sql.unsafe<object>(memberSelect(
+        "WHERE installation_id = $1 AND email = $2",
+      ), [installationId, email]);
+      return memberRowSchema.nullable().parse(rows[0] ?? null);
+    }));
+  }
+
   async findActiveMemberByExternalIdentity(
     installationId: string,
     provider: string,

@@ -93,7 +93,7 @@ describe("Cloudflare Worker runtime", () => {
     expect(missingApi.headers.get("content-type")).toContain("application/json");
 
     const contentHostRoute = await worker.fetch(
-      `https://${"a".repeat(40)}.${contentDomain}/projects`,
+      `https://${"a".repeat(36)}.${contentDomain}/projects`,
     );
     expect(contentHostRoute.status).toBe(404);
     expect(contentHostRoute.headers.get("content-type")).toContain(

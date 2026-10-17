@@ -1,4 +1,5 @@
 import {Effect, Schema, type Redacted} from "effect";
+import {validateContentHostSuffix} from "../core/content-host-policy.js";
 import {getDomain} from "tldts";
 
 import {findUnsafeCloudDeploymentValue} from
@@ -58,6 +59,15 @@ const stateBackendUrl = Schema.String.check(
     [{field: "stateBackendUrl", value}],
     [],
   ) === null ? undefined : "state backend URL must not contain credentials"),
+);
+const cloudflareAccessAudience = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9]{1,128}$/u),
+);
+const cloudflareAccessPolicyId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9-]{1,64}$/u),
+);
+const cloudflareAccessTeamDomain = Schema.String.check(
+  Schema.isPattern(/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/u),
 );
 const compatibilityDate = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/u),
@@ -189,6 +199,16 @@ export interface GcpCloudDeploymentInput extends Schema.Schema.Type<
 /** Shared Cloudflare deployment input consumed by the native Alchemy project. */
 export const CloudflareCloudDeploymentInput = Schema.Struct({
   ...sharedInputFields,
+  accessAudiences: Schema.optionalKey(
+    Schema.Array(cloudflareAccessAudience).check(Schema.isMinLength(1)),
+  ),
+  accessLogin: Schema.optionalKey(Schema.Boolean),
+  accessAppAudience: Schema.optionalKey(cloudflareAccessAudience),
+  accessSyncApiTokenSecretRef: Schema.optionalKey(providerResourceIdentifier),
+  accessSyncPolicyId: Schema.optionalKey(cloudflareAccessPolicyId),
+  accessTeamDomain: Schema.optionalKey(cloudflareAccessTeamDomain),
+  autoAdmitOidcMembers: Schema.optionalKey(Schema.Boolean),
+  contentHostSuffix: Schema.optionalKey(Schema.String),
   cloudflareAccountId: identifier,
   cloudflareArtifactsNamespace: Schema.optionalKey(cloudflareArtifactsNamespace),
   compatibilityDate,
@@ -277,6 +297,14 @@ export const CloudDeploymentInput = uncheckedCloudDeploymentInput.check(
       });
     }
     if (input.target === "cloudflare") {
+      try {
+        validateContentHostSuffix(input.contentDomain, input.contentHostSuffix);
+      } catch {
+        issues.push({
+          issue: "contentHostSuffix must be -<1–16 character label>.<contentDomain>",
+          path: ["contentHostSuffix"],
+        });
+      }
       const oidcPresence = [
         input.oidcClientId,
         input.oidcClientSecretRef,
@@ -300,6 +328,36 @@ export const CloudDeploymentInput = uncheckedCloudDeploymentInput.check(
         issues.push({
           issue: "WorkOS and OIDC browser-login settings are mutually exclusive",
           path: ["oidcClientId"],
+        });
+      }
+      if (input.accessLogin === true) {
+        if (oidcConfigured || workOsPresence.some((present) => present)) {
+          issues.push({issue: "Access login cannot be combined with OIDC or WorkOS", path: ["accessLogin"]});
+        }
+        if (input.accessTeamDomain === undefined || input.accessAudiences === undefined ||
+          input.accessAppAudience === undefined || !input.accessAudiences.includes(input.accessAppAudience)) {
+          issues.push({issue: "Access login requires team domain, audiences, and an app audience included in audiences", path: ["accessAppAudience"]});
+        }
+      }
+      if (input.autoAdmitOidcMembers === true && input.oidcClientId === undefined && input.accessLogin !== true) {
+        issues.push({
+          issue: "autoAdmitOidcMembers requires OIDC or Access browser login",
+          path: ["autoAdmitOidcMembers"],
+        });
+      }
+      if (
+        (input.accessSyncPolicyId === undefined) !==
+          (input.accessSyncApiTokenSecretRef === undefined)
+      ) {
+        issues.push({
+          issue: "Access policy sync requires both a policy ID and an API token secret reference",
+          path: ["accessSyncPolicyId"],
+        });
+      }
+      if ((input.accessTeamDomain === undefined) !== (input.accessAudiences === undefined)) {
+        issues.push({
+          issue: "Access JWT enforcement requires both a team domain and audiences",
+          path: ["accessTeamDomain"],
         });
       }
     }

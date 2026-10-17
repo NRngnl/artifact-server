@@ -83,6 +83,7 @@ export async function startTestServer(
   installation: TestInstallation,
   options: {
     readonly applicationOrigin?: string;
+    readonly autoAdmitExternalMembers?: boolean;
     readonly bootstrapAdministratorEmail?: string;
     readonly browserAccess?: BrowserAccess;
     readonly contentDomain?: string;
@@ -126,6 +127,12 @@ export async function startTestServer(
   }
   if (options.clock !== undefined) {
     config = {...config, clock: options.clock};
+  }
+  if (options.autoAdmitExternalMembers !== undefined) {
+    config = {
+      ...config,
+      autoAdmitExternalMembers: options.autoAdmitExternalMembers,
+    };
   }
   if (options.apiOAuthResource !== undefined) {
     config = {...config, apiOAuthResource: options.apiOAuthResource};

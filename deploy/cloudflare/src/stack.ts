@@ -18,6 +18,7 @@ export type CloudflareZoneResolver =
 
 /** Secret values supplied to the Cloudflare authentication adapters. */
 export interface CloudflareAuthenticationSecrets {
+  readonly accessSyncApiToken?: Redacted.Redacted;
   readonly oidcClientSecret?: Redacted.Redacted;
   readonly workOsApiKey?: Redacted.Redacted;
 }
@@ -143,7 +144,7 @@ export const defineCloudflareFoundation = Effect.fn(
     ? yield* Cloudflare.DNS.Record("ContentWildcardDns", {
       comment: "Artifact Server version content",
       content: "100::",
-      name: `*.${input.contentDomain}`,
+      name: `*${input.contentHostSuffix ?? `.${input.contentDomain}`}`,
       proxied: true,
       ttl: "1",
       type: "AAAA",
@@ -218,6 +219,43 @@ export const defineCloudflareFoundation = Effect.fn(
         ARTIFACT_SERVER_OIDC_SCOPES: input.oidcScopes,
       };
     }
+  }
+  if (input.autoAdmitOidcMembers === true) {
+    workerEnvironment = {
+      ...workerEnvironment,
+      ARTIFACT_SERVER_AUTO_ADMIT_OIDC_MEMBERS: "true",
+    };
+  }
+  if (
+    input.accessSyncPolicyId !== undefined &&
+    input.accessSyncApiTokenSecretRef !== undefined
+  ) {
+    if (authenticationSecrets.accessSyncApiToken === undefined) {
+      return yield* Effect.die(
+        new Error("Configured Access policy sync requires its deployment secret."),
+      );
+    }
+    workerEnvironment = {
+      ...workerEnvironment,
+      ARTIFACT_SERVER_CF_ACCESS_SYNC_ACCOUNT_ID: input.cloudflareAccountId,
+      ARTIFACT_SERVER_CF_ACCESS_SYNC_API_TOKEN:
+        authenticationSecrets.accessSyncApiToken,
+      ARTIFACT_SERVER_CF_ACCESS_SYNC_POLICY_ID: input.accessSyncPolicyId,
+    };
+  }
+  if (input.accessTeamDomain !== undefined && input.accessAudiences !== undefined) {
+    workerEnvironment = {
+      ...workerEnvironment,
+      ARTIFACT_SERVER_CF_ACCESS_AUDIENCES: input.accessAudiences.join(","),
+      ARTIFACT_SERVER_CF_ACCESS_TEAM_DOMAIN: input.accessTeamDomain,
+    };
+  }
+  if (input.accessLogin === true) {
+    workerEnvironment = {
+      ...workerEnvironment,
+      ARTIFACT_SERVER_CF_ACCESS_LOGIN: "true",
+      ARTIFACT_SERVER_CF_ACCESS_APP_AUDIENCE: input.accessAppAudience,
+    };
   }
   const workerProps: Cloudflare.WorkerProps = {
     assets: {

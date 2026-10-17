@@ -1,4 +1,9 @@
 import {Effect, Layer, ManagedRuntime, Redacted} from "effect";
+import type {JWTPayload} from "jose";
+
+import {accessBrowserLogin} from "./access-browser-login.js";
+import {validateContentHostSuffix} from "../../../src/core/content-host-policy.js";
+import {contentHostSuffix, tokenFromContentHostname} from "../../../src/http/content-host.js";
 
 import type {ApplicationRuntime} from "../../../src/application/application-runtime.js";
 import {ExpiredStagingCleanupService} from
@@ -19,6 +24,12 @@ import {
   structuredLoggingLayer,
 } from "../../../src/observability/application-observability.js";
 import {createD1ArtifactRepository} from "./d1-artifact-repository.js";
+import {
+  accessJwtGuardConfig,
+  createAccessJwtGuard,
+  type AccessJwtGuard,
+} from "./access-jwt-guard.js";
+import {reconcileAccessPolicy, withAccessPolicySync, type AccessPolicySyncConfig} from "./access-policy-sync.js";
 import {createD1IdentityRepository} from "./d1-identity-repository.js";
 import {migrateD1, requiredD1SchemaVersion} from "./d1-migrations.js";
 import {createR2ObjectStorageAdapters} from "./r2-object-storage.js";
@@ -51,8 +62,17 @@ export interface WorkerEnvironment {
   readonly ASSETS: Fetcher;
   readonly ARTIFACTS?: ArtifactsBinding;
   readonly ARTIFACT_SERVER_API_TOKEN: string;
+  readonly ARTIFACT_SERVER_AUTO_ADMIT_OIDC_MEMBERS?: string;
   readonly ARTIFACT_SERVER_BOOTSTRAP_ADMIN_EMAIL: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_AUDIENCES?: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_LOGIN?: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_APP_AUDIENCE?: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_SYNC_ACCOUNT_ID?: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_SYNC_API_TOKEN?: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_SYNC_POLICY_ID?: string;
+  readonly ARTIFACT_SERVER_CF_ACCESS_TEAM_DOMAIN?: string;
   readonly ARTIFACT_SERVER_CONTENT_DOMAIN: string;
+  readonly ARTIFACT_SERVER_CONTENT_HOST_SUFFIX?: string;
   readonly ARTIFACT_SERVER_CLOUDFLARE_ARTIFACTS_ACCOUNT_ID?: string;
   readonly ARTIFACT_SERVER_CLOUDFLARE_ARTIFACTS_NAMESPACE?: string;
   readonly ARTIFACT_SERVER_D1_DATABASE: D1Database;
@@ -72,11 +92,12 @@ export interface WorkerEnvironment {
 
 interface CloudflareRuntime {
   readonly app: ReturnType<typeof createHttpApp>;
-  readonly applicationHostname: string;
+  readonly applicationOrigin: string;
   readonly contentDomain: string;
   readonly qualificationMode: boolean;
   cleanupStaging(): Promise<void>;
   drainGitHistory(): Promise<void>;
+  reconcileAccessPolicy(): Promise<void>;
 }
 
 interface WorkerErrorResponse {
@@ -85,6 +106,10 @@ interface WorkerErrorResponse {
 }
 
 let runtimePromise: Promise<CloudflareRuntime> | null = null;
+// Request-local, verified claims never travel through client-controlled headers.
+const verifiedAccessClaims = new WeakMap<Request, JWTPayload>();
+// Module scope so the JWKS cache survives across requests in one isolate.
+let accessGuard: {readonly key: string; readonly guard: AccessJwtGuard | null} | null = null;
 
 export default {
   async fetch(
@@ -92,6 +117,8 @@ export default {
     environment: WorkerEnvironment,
     context: ExecutionContext,
   ): Promise<Response> {
+    const claims = await getAccessGuard(environment)?.(request) ?? null;
+    if (claims instanceof Response) return claims;
     try {
       const runtime = await getRuntime(environment);
       const prepared = prepareRequest(request, runtime);
@@ -101,6 +128,7 @@ export default {
           message: "This hostname is not assigned to this Artifact Server.",
         });
       }
+      if (claims !== null) verifiedAccessClaims.set(prepared, claims);
       if (!["GET", "HEAD", "OPTIONS"].includes(prepared.method)) {
         context.waitUntil(runtime.drainGitHistory());
       }
@@ -130,7 +158,34 @@ async function runScheduledCleanup(
   environment: WorkerEnvironment,
 ): Promise<void> {
   const runtime = await getRuntime(environment);
-  await Promise.all([runtime.cleanupStaging(), runtime.drainGitHistory()]);
+  await Promise.all([runtime.cleanupStaging(), runtime.drainGitHistory(), runtime.reconcileAccessPolicy()]);
+}
+
+function getAccessGuard(environment: WorkerEnvironment): AccessJwtGuard | null {
+  const teamDomain = environment.ARTIFACT_SERVER_CF_ACCESS_TEAM_DOMAIN;
+  const audiences = environment.ARTIFACT_SERVER_CF_ACCESS_AUDIENCES;
+  const key = `${teamDomain ?? ""}|${audiences ?? ""}`;
+  if (accessGuard?.key !== key) {
+    const config = accessJwtGuardConfig(teamDomain, audiences);
+    accessGuard = {guard: config === null ? null : createAccessJwtGuard(config), key};
+  }
+  return accessGuard.guard;
+}
+
+function accessPolicySyncConfig(
+  environment: WorkerEnvironment,
+): AccessPolicySyncConfig | null {
+  const accountId = environment.ARTIFACT_SERVER_CF_ACCESS_SYNC_ACCOUNT_ID;
+  const policyId = environment.ARTIFACT_SERVER_CF_ACCESS_SYNC_POLICY_ID;
+  const apiToken = environment.ARTIFACT_SERVER_CF_ACCESS_SYNC_API_TOKEN;
+  if (!accountId || !policyId || !apiToken) return null;
+  return {
+    accountId,
+    apiToken,
+    bootstrapAdministratorEmail:
+      environment.ARTIFACT_SERVER_BOOTSTRAP_ADMIN_EMAIL,
+    policyId,
+  };
 }
 
 function getRuntime(environment: WorkerEnvironment): Promise<CloudflareRuntime> {
@@ -150,17 +205,20 @@ async function createCloudflareRuntime(
     environment.ARTIFACT_SERVER_D1_DATABASE,
     environment.ARTIFACT_SERVER_INSTALLATION_ID,
   );
-  const identityRepository = createD1IdentityRepository(
-    environment.ARTIFACT_SERVER_D1_DATABASE,
-  );
+  const syncConfig = accessPolicySyncConfig(environment);
+  const identities = createD1IdentityRepository(environment.ARTIFACT_SERVER_D1_DATABASE);
+  const identityRepository = syncConfig === null ? identities : withAccessPolicySync(identities, syncConfig);
   const {blobs, staging} = createR2ObjectStorageAdapters(
     environment.ARTIFACT_SERVER_R2_BUCKET,
     environment.ARTIFACT_SERVER_INSTALLATION_ID,
   );
   const gitHistory = await initializeGitHistory(environment, repository, blobs);
+  const trustedBrowserLogin = accessBrowserLogin(environment, verifiedAccessClaims);
   const oidcIdentityProvider = oidcAuthentication(environment);
   const hostedAuthentication = await workOsAuthentication(environment);
-  const browserAccess = hostedAuthentication !== null
+  const browserAccess = trustedBrowserLogin !== undefined
+    ? privateTeamBrowserAccess(browserLoginKinds.cloudflareAccess)
+    : hostedAuthentication !== null
     ? privateTeamBrowserAccess(browserLoginKinds.workOs)
     : oidcIdentityProvider !== null
     ? privateTeamBrowserAccess(browserLoginKinds.oidc)
@@ -169,6 +227,8 @@ async function createCloudflareRuntime(
     apiToken: Redacted.make(environment.ARTIFACT_SERVER_API_TOKEN, {
       label: "cloudflare-api-token",
     }),
+    autoAdmitExternalMembers:
+      environment.ARTIFACT_SERVER_AUTO_ADMIT_OIDC_MEMBERS === "true",
     blobs,
     bootstrapAdministratorEmail:
       environment.ARTIFACT_SERVER_BOOTSTRAP_ADMIN_EMAIL,
@@ -198,7 +258,7 @@ async function createCloudflareRuntime(
   );
   await applicationRuntime.context();
   const origin = new URL(environment.ARTIFACT_SERVER_ORIGIN);
-  const appDependencies = {
+  let appDependencies: Parameters<typeof createHttpApp>[0] = {
     applicationRuntime,
     blobs,
     browserAccess,
@@ -216,6 +276,11 @@ async function createCloudflareRuntime(
       },
     },
   };
+  if (environment.ARTIFACT_SERVER_CONTENT_HOST_SUFFIX !== undefined) {
+    appDependencies = {...appDependencies,
+      contentHostSuffix: environment.ARTIFACT_SERVER_CONTENT_HOST_SUFFIX};
+  }
+  if (trustedBrowserLogin !== undefined) appDependencies = {...appDependencies, trustedBrowserLogin};
   const app = createHttpApp(hostedAuthentication === null
     ? appDependencies
     : {
@@ -224,7 +289,7 @@ async function createCloudflareRuntime(
     });
   return {
     app,
-    applicationHostname: origin.hostname,
+    applicationOrigin: origin.origin,
     cleanupStaging: async () => {
       const report = await applicationRuntime.runPromise(
         ExpiredStagingCleanupService.use((cleanup) =>
@@ -235,7 +300,13 @@ async function createCloudflareRuntime(
       }
     },
     drainGitHistory: gitHistory.drain,
-    contentDomain: environment.ARTIFACT_SERVER_CONTENT_DOMAIN,
+    reconcileAccessPolicy: async () => {
+      if (syncConfig !== null) {
+        await reconcileAccessPolicy(identities, environment.ARTIFACT_SERVER_INSTALLATION_ID, syncConfig);
+      }
+    },
+    contentDomain: contentHostSuffix(environment.ARTIFACT_SERVER_CONTENT_DOMAIN,
+      environment.ARTIFACT_SERVER_CONTENT_HOST_SUFFIX),
     qualificationMode:
       environment.ARTIFACT_SERVER_QUALIFICATION_MODE === "enabled",
   };
@@ -413,7 +484,7 @@ function requireEnvironmentValue(value: string | undefined): string {
 
 function missingIdentityProvider(): never {
   throw new Error(
-    "A private-team server requires exactly one OIDC or WorkOS browser-login provider.",
+    "A private-team server requires exactly one Access, OIDC, or WorkOS browser-login provider.",
   );
 }
 
@@ -422,10 +493,14 @@ function prepareRequest(
   runtime: CloudflareRuntime,
 ): Request | null {
   const url = new URL(request.url);
-  if (
-    url.hostname === runtime.applicationHostname ||
-    url.hostname.endsWith(`.${runtime.contentDomain}`)
-  ) return request;
+  const applicationUrl = new URL(runtime.applicationOrigin);
+  if (url.hostname === applicationUrl.hostname) {
+    if (!runtime.qualificationMode) return request;
+    url.host = applicationUrl.host;
+    url.protocol = applicationUrl.protocol;
+    return new Request(url, request);
+  }
+  if (tokenFromContentHostname(url.hostname, contentHostSuffix(runtime.contentDomain)) !== null) return request;
   if (
     runtime.qualificationMode && (
       url.hostname.endsWith(".workers.dev") ||
@@ -434,7 +509,8 @@ function prepareRequest(
       url.hostname === "[::1]"
     )
   ) {
-    url.hostname = runtime.applicationHostname;
+    url.host = applicationUrl.host;
+    url.protocol = applicationUrl.protocol;
     return new Request(url, request);
   }
   return null;
@@ -451,6 +527,8 @@ function validateEnvironment(environment: WorkerEnvironment): void {
   if (origin.protocol !== "https:" || origin.pathname !== "/") {
     throw new Error("ARTIFACT_SERVER_ORIGIN must be an HTTPS origin.");
   }
+  validateContentHostSuffix(environment.ARTIFACT_SERVER_CONTENT_DOMAIN,
+    environment.ARTIFACT_SERVER_CONTENT_HOST_SUFFIX);
   if (environment.ARTIFACT_SERVER_CONTENT_DOMAIN.trim() === "") {
     throw new Error("ARTIFACT_SERVER_CONTENT_DOMAIN is required.");
   }

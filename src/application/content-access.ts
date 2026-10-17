@@ -1,3 +1,4 @@
+import {isReviewLeaseToken, previewLeaseToken} from "../core/preview-lease-token.js";
 import {
   Context,
   DateTime,
@@ -45,7 +46,7 @@ export const previewLeaseTokenPrefix = "review-";
 
 /** Return whether a content-host token represents a Review preview lease. */
 export function isPreviewLeaseToken(token: string): boolean {
-  return token.startsWith(previewLeaseTokenPrefix);
+  return isReviewLeaseToken(token);
 }
 
 /** Secret material generated for private-content authorization. */
@@ -153,6 +154,7 @@ export interface AuthorizeVersionContentCommand {
 
 /** Input for issuing one embedded Review lease for an exact saved version. */
 export interface IssuePreviewLeaseCommand {
+  readonly tokenCharacterLimit?: number;
   readonly artifactId: string;
   readonly principal: Principal;
   readonly projectId: string | null;
@@ -306,10 +308,10 @@ function makeContentAccessService(
     const issued = dependencies.secrets.issue();
     // A DNS label may contain at most 63 characters. The provider digest is
     // uniform lowercase hexadecimal, so 56 characters plus the `review-`
-    // discriminator gives the lease 224 bits of entropy and a valid label on
-    // every deployment without case-folding secret material in DNS.
+    // discriminator gives dotted leases 224 bits; flat leases retain at least
+    // 160 bits without case-folding secret material in DNS.
     const token = Redacted.make(
-      `${previewLeaseTokenPrefix}${issued.digest.slice(0, 56)}`,
+      previewLeaseToken(issued.digest, command.tokenCharacterLimit),
       {label: "preview-lease-token"},
     );
     const expiresAt = DateTime.formatIso(

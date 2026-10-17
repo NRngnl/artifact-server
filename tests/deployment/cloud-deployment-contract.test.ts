@@ -85,6 +85,23 @@ describe("shared cloud deployment contract", () => {
     expect(publicClient).not.toHaveProperty("oidcClientSecretRef");
   });
 
+  test("accepts Cloudflare Access auto-admission, policy sync, and JWT settings", async () => {
+    const access = {
+      accessAudiences: ["abc123def456", "fedcba654321"],
+      accessSyncApiTokenSecretRef:
+        "cloudflare-secrets-store://artifact-server-access-sync-token",
+      accessSyncPolicyId: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+      accessTeamDomain: "https://team.cloudflareaccess.com",
+      autoAdmitOidcMembers: true,
+      oidcClientId: "artifact-server-cloudflare",
+      oidcIssuer:
+        "https://team.cloudflareaccess.com/cdn-cgi/access/sso/oidc/client-id",
+    };
+    await expect(Effect.runPromise(parseCloudDeploymentInput(
+      cloudflareInput(access),
+    ))).resolves.toMatchObject(access);
+  });
+
   test.each([
     ["floating image tag", awsInput({imageReference: "artifact-server:latest"})],
     ["same registrable content domain", awsInput({
@@ -153,6 +170,22 @@ describe("shared cloud deployment contract", () => {
       compatibilityDate: "2026-02-31",
     })],
     ["non-global Cloudflare region", cloudflareInput({region: "us-west-2"})],
+    ["auto-admission without OIDC", cloudflareInput({autoAdmitOidcMembers: true})],
+    ["Access sync policy without its token reference", cloudflareInput({
+      accessSyncPolicyId: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+    })],
+    ["Access JWT team domain without audiences", cloudflareInput({
+      accessTeamDomain: "https://team.cloudflareaccess.com",
+    })],
+    ["empty Access audiences", cloudflareInput({
+      accessAudiences: [],
+      accessTeamDomain: "https://team.cloudflareaccess.com",
+    })],
+    ["non-Access team domain", cloudflareInput({
+      accessAudiences: ["abc123"],
+      accessTeamDomain: "https://evil.example.com",
+    })],
+    ["Access fields on AWS", awsInput({autoAdmitOidcMembers: false})],
   ])("rejects %s before a provider write", async (_name, input) => {
     const failure = await Effect.runPromise(
       parseCloudDeploymentInput(input).pipe(Effect.flip),

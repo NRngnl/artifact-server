@@ -7,6 +7,7 @@ import {
   type ArtifactVersion,
 } from "@/api/client";
 import {formatBytes} from "@/lib/presentation";
+import {reviewFrameUrl} from "./review-frame-url";
 import {
   frameMessageSchema,
   reviewProtocolVersion,
@@ -401,7 +402,7 @@ function HtmlPreview({
     <iframe
       className="as-artifact-frame"
       ref={frameRef}
-      src="/review-frame"
+      src={reviewFrameUrl(previewDocument?.baseHref)}
       title={`${version.version.artifactId} version ${version.version.number}`}
     />
   );

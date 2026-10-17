@@ -167,7 +167,7 @@ function makeInteractiveLoginService(
   return InteractiveLoginService.of({complete, start});
 }
 
-function safeReturnTo(value: string): string {
+export function safeReturnTo(value: string): string {
   const fallback = "/api/v1/session";
   if (
     !value.startsWith("/") || value.startsWith("//") ||

@@ -80,7 +80,7 @@ const accessContextSchema = z.discriminatedUnion("accessMode", [
   }),
   z.object({
     accessMode: z.literal("private_team"),
-    login: z.object({kind: z.enum(["oidc", "workos"])}),
+    login: z.object({kind: z.enum(["oidc", "workos", "cloudflare_access"])}),
   }),
 ]);
 
@@ -868,12 +868,14 @@ export const api = {
   }),
   session: () => request(sessionSchema, "/api/v1/session"),
   logout: async () => {
+    const access = await request(accessContextSchema, "/auth/context");
     await requestNoContent("/api/v1/session/logout", {
       headers: mutationHeaders(),
       method: "POST",
     });
     // Drafts and other departing-principal state listen for this.
     window.dispatchEvent(new Event("artifact-session-logout"));
+    if (access.login.kind === "cloudflare_access") window.location.assign("/auth/logout");
   },
   publicLinks: (cursor: string | null) => {
     const query = new URLSearchParams({ limit: "25" });

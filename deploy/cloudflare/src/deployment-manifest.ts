@@ -1,4 +1,5 @@
 import type { CloudflareDeploymentInput } from "./deployment-input.ts";
+import {contentHostRuntimeConfiguration, effectiveStackName} from "./stack-name.ts";
 
 const WORKER_NAME_LIMIT = 63;
 const WORKERS_DEV_NAME_LIMIT = 54;
@@ -39,6 +40,7 @@ export interface CloudflareDeploymentManifest {
   readonly runtimeConfiguration: {
     readonly ARTIFACT_SERVER_ORIGIN: string;
     readonly ARTIFACT_SERVER_CONTENT_DOMAIN: string;
+    readonly ARTIFACT_SERVER_CONTENT_HOST_SUFFIX?: string;
     readonly ARTIFACT_SERVER_BOOTSTRAP_ADMIN_EMAIL: string;
     readonly ARTIFACT_SERVER_HOST: "0.0.0.0";
     readonly ARTIFACT_SERVER_PORT: 8787;
@@ -73,7 +75,7 @@ export const buildCloudflareDeploymentManifest = (
   };
 
   return {
-    stackName: "artifact-server-cloudflare",
+    stackName: effectiveStackName(input.contentHostSuffix),
     stage: input.stage,
     resourceNames: {
       worker: boundedName(`${baseName}-worker`, workerNameLimit),
@@ -83,12 +85,13 @@ export const buildCloudflareDeploymentManifest = (
     applicationOrigin: `https://${input.applicationDomain}`,
     routes: {
       application: `${input.applicationDomain}/*`,
-      content: `*.${input.contentDomain}/*`,
+      content: `*${input.contentHostSuffix ?? `.${input.contentDomain}`}/*`,
     },
     workerTags: Object.entries(requiredTags)
       .toSorted(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => `${key}:${value}`),
     runtimeConfiguration: {
+      ...contentHostRuntimeConfiguration(input.contentHostSuffix),
       ARTIFACT_SERVER_ORIGIN: `https://${input.applicationDomain}`,
       ARTIFACT_SERVER_CONTENT_DOMAIN: input.contentDomain,
       ARTIFACT_SERVER_BOOTSTRAP_ADMIN_EMAIL:

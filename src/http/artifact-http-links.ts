@@ -1,3 +1,5 @@
+import {contentHostname} from "./content-host.js";
+
 /** Build the stable browser URL for an artifact's current version. */
 export function artifactBrowserUrl(
   applicationUrl: URL,
@@ -30,7 +32,7 @@ export function versionBrowserUrl(
   contentToken: string,
 ): string {
   const versionUrl = new URL(applicationUrl);
-  versionUrl.hostname = `${contentToken}.${contentDomain}`;
+  versionUrl.hostname = contentHostname(contentToken, contentDomain);
   versionUrl.pathname = "/";
   versionUrl.search = "";
   versionUrl.hash = "";
@@ -60,7 +62,7 @@ export function contentBootstrapBrowserUrl(
   destinationPath?: string,
 ): string {
   const bootstrapUrl = new URL(applicationUrl);
-  bootstrapUrl.hostname = `${contentToken}.${contentDomain}`;
+  bootstrapUrl.hostname = contentHostname(contentToken, contentDomain);
   bootstrapUrl.pathname = destinationPath === undefined
     ? "/"
     : `/${destinationPath.split("/").map(encodeURIComponent).join("/")}`;

@@ -82,6 +82,8 @@ export interface LocalRuntimeConfig {
   readonly apiToken: string;
   readonly apiOAuthResource?: ApiOAuthResourceConfiguration;
   readonly applicationOrigin?: string;
+  /** Admit verified OIDC users who have no member record. Default false. */
+  readonly autoAdmitExternalMembers?: boolean;
   readonly bootstrapAdministratorEmail?: string;
   readonly browserAccess: BrowserAccess;
   readonly clock?: Clock;
@@ -215,6 +217,7 @@ export async function createLocalRuntime(
     apiToken: config.browserAccess.mode === browserAccessModes.localOwner
       ? apiToken
       : null,
+    autoAdmitExternalMembers: config.autoAdmitExternalMembers ?? false,
     blobs,
     bootstrapAdministratorEmail: config.bootstrapAdministratorEmail ??
       "local-administrator@artifactserver.invalid",

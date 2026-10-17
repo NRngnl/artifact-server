@@ -106,7 +106,7 @@ const options = {
 } satisfies Test.MakeOptions;
 
 describe("Alchemy foundation plan", () => {
-  it("plans the public Worker, D1, R2, and content DNS without provider writes", async () => {
+  it("plans Access login, the public Worker, D1, R2, and content DNS without provider writes", async () => {
     const resolvedHostnames: string[] = [];
     const resolveZoneId: CloudflareZoneResolver = ({ hostname }) => {
       resolvedHostnames.push(hostname);
@@ -116,11 +116,15 @@ describe("Alchemy foundation plan", () => {
           : validDeploymentInput.dnsZoneIds?.content ?? "",
       );
     };
+    const accessInput = {...validDeploymentInput,
+      accessLogin: true, accessAppAudience: "a".repeat(64),
+      accessAudiences: ["a".repeat(64), "b".repeat(64)],
+      accessTeamDomain: "https://example-team.cloudflareaccess.com"};
     const scratch = Test.scratchStack(options, "foundation-plan");
     const plan = await Test.run(
       scratch.plan(
         defineCloudflareFoundation(
-          validDeploymentInput,
+          accessInput,
           Redacted.make("test-only-runtime-token-value"),
           resolveZoneId,
         ),
@@ -178,6 +182,12 @@ describe("Alchemy foundation plan", () => {
       ({ resource }) => resource.Type === "Cloudflare.Worker",
     );
     expect(worker?.resource.Props).toMatchObject({
+      env: {
+        ARTIFACT_SERVER_CF_ACCESS_LOGIN: "true",
+        ARTIFACT_SERVER_CF_ACCESS_APP_AUDIENCE: accessInput.accessAppAudience,
+        ARTIFACT_SERVER_CF_ACCESS_AUDIENCES: accessInput.accessAudiences.join(","),
+        ARTIFACT_SERVER_CF_ACCESS_TEAM_DOMAIN: accessInput.accessTeamDomain,
+      },
       assets: {
         htmlHandling: "none",
         notFoundHandling: "none",
@@ -337,6 +347,68 @@ describe("Alchemy foundation plan", () => {
       ),
     ).rejects.toThrow(
       "Configured OIDC authentication requires its deployment secret.",
+    );
+  });
+
+  it("binds Access auto-admission, policy sync, and JWT enforcement", async () => {
+    const accessInput = {
+      ...validDeploymentInput,
+      accessAudiences: ["abc123def456", "fedcba654321"],
+      accessSyncApiTokenSecretRef:
+        "cloudflare-secrets-store://artifact-server-access-sync-token",
+      accessSyncPolicyId: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+      accessTeamDomain: "https://team.cloudflareaccess.com",
+      autoAdmitOidcMembers: true,
+      oidcClientId: "artifact-server-cloudflare",
+      oidcIssuer:
+        "https://team.cloudflareaccess.com/cdn-cgi/access/sso/oidc/client-id",
+    };
+    const resolveZoneId: CloudflareZoneResolver = ({hostname}) =>
+      Effect.succeed(
+        hostname === accessInput.applicationDomain
+          ? accessInput.dnsZoneIds.application
+          : accessInput.dnsZoneIds.content,
+      );
+    const scratch = Test.scratchStack(options, "access-plan");
+    const syncToken = "test-only-access-sync-token-value";
+    const plan = await Test.run(
+      scratch.plan(
+        defineCloudflareFoundation(
+          accessInput,
+          Redacted.make("test-only-runtime-token-value"),
+          resolveZoneId,
+          {accessSyncApiToken: Redacted.make(syncToken)},
+        ),
+      ),
+      options,
+    );
+    const worker = Object.values(plan.resources).find(
+      ({resource}) => resource.Type === "Cloudflare.Worker",
+    );
+    const environment = worker?.resource.Props.env;
+
+    expect(environment).toMatchObject({
+      ARTIFACT_SERVER_AUTO_ADMIT_OIDC_MEMBERS: "true",
+      ARTIFACT_SERVER_CF_ACCESS_AUDIENCES: "abc123def456,fedcba654321",
+      ARTIFACT_SERVER_CF_ACCESS_SYNC_ACCOUNT_ID: accessInput.cloudflareAccountId,
+      ARTIFACT_SERVER_CF_ACCESS_SYNC_POLICY_ID: accessInput.accessSyncPolicyId,
+      ARTIFACT_SERVER_CF_ACCESS_TEAM_DOMAIN: accessInput.accessTeamDomain,
+    });
+    expect(JSON.stringify(environment)).not.toContain(syncToken);
+
+    await expect(
+      Test.run(
+        scratch.plan(
+          defineCloudflareFoundation(
+            accessInput,
+            Redacted.make("test-only-runtime-token-value"),
+            resolveZoneId,
+          ),
+        ),
+        options,
+      ),
+    ).rejects.toThrow(
+      "Configured Access policy sync requires its deployment secret.",
     );
   });
 

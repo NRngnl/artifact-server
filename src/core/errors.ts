@@ -438,6 +438,7 @@ export class IdentityRepositoryFailure extends Schema.TaggedError<IdentityReposi
       "deactivateMember",
       "findActiveMemberByEmail",
       "findActiveMemberByExternalIdentity",
+      "findMemberByEmail",
       "findMember",
       "findApiKey",
       "findApplicationSession",

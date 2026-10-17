@@ -4,6 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 
 import {z} from "zod";
+import {exportJWK, generateKeyPair, SignJWT, type JWK} from "jose";
 import {unstable_dev, type Unstable_DevWorker} from "wrangler";
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
 
@@ -22,8 +23,13 @@ const notReadySchema = z.object({
 
 let issuerOrigin: string;
 let issuer: Server;
+let accessKey: CryptoKey;
+let accessJwk: JWK;
 
 beforeAll(async () => {
+  const pair = await generateKeyPair("RS256");
+  accessKey = pair.privateKey;
+  accessJwk = {...await exportJWK(pair.publicKey), kid: "access-runtime", alg: "RS256"};
   issuer = await startDiscoveryStub();
   const address = assignedAddressSchema.parse(issuer.address());
   issuerOrigin =
@@ -37,6 +43,58 @@ afterAll(async () => {
 });
 
 describe("Cloudflare Worker browser-login provider", () => {
+  it("uses verified Access claims on the prepared application request, without OIDC", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "artifact-server-access-"));
+    const team = new URL(issuerOrigin).origin;
+    const appAudience = "a".repeat(64);
+    const contentAudience = "b".repeat(64);
+    const sign = (claims: {email?: string; sub: string; common_name?: string}, aud = appAudience) =>
+      new SignJWT(claims).setProtectedHeader({alg: "RS256", kid: "access-runtime"})
+        .setIssuer(team).setAudience(aud).setExpirationTime("5m").sign(accessKey);
+    const token = await sign({email: "administrator@example.test", sub: "administrator"});
+    const worker = await startWorker(directory, {
+      ARTIFACT_SERVER_CF_ACCESS_LOGIN: "true",
+      ARTIFACT_SERVER_CF_ACCESS_TEAM_DOMAIN: team,
+      ARTIFACT_SERVER_CF_ACCESS_AUDIENCES: `${appAudience},${contentAudience}`,
+      ARTIFACT_SERVER_CF_ACCESS_APP_AUDIENCE: appAudience,
+    });
+    try {
+      const started = await worker.fetch(`${origin}/auth/login?returnTo=/review`, {
+        headers: {"Cf-Access-Jwt-Assertion": token, "Sec-Fetch-Site": "none"}, redirect: "manual",
+      });
+      expect(started.status).toBe(303);
+      expect(started.headers.get("location")).toBe("/review");
+      const cookies = started.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
+      expect(cookies).toContain("__Host-artifact_session=");
+      expect(cookies).toContain("__Host-artifact_csrf=");
+      const session = await worker.fetch(`${origin}/api/v1/session`, {
+        headers: {Cookie: cookies, "Cf-Access-Jwt-Assertion": token},
+      });
+      expect(session.status).toBe(200);
+      expect(z.object({principal: z.object({membershipRole: z.string()})}).parse(await session.json())
+        .principal.membershipRole).toBe("administrator");
+      const service = await worker.fetch(`${origin}/auth/login`, {
+        headers: {"Cf-Access-Jwt-Assertion": await sign({sub: "service", common_name: "automation"})}, redirect: "manual",
+      });
+      expect(service.status).toBe(401);
+      expect(service.headers.getSetCookie()).toHaveLength(0);
+      const content = await worker.fetch(`${origin}/auth/login`, {
+        headers: {"Cf-Access-Jwt-Assertion": await sign({email: "administrator@example.test", sub: "administrator"}, contentAudience)},
+        redirect: "manual",
+      });
+      expect(content.status).toBe(401);
+      expect(content.headers.getSetCookie()).toHaveLength(0);
+      const logout = await worker.fetch(`${origin}/auth/logout`, {
+        headers: {"Cf-Access-Jwt-Assertion": token, Cookie: cookies, "Sec-Fetch-Site": "same-origin"}, redirect: "manual",
+      });
+      expect(logout.status).toBe(303);
+      expect(logout.headers.get("location")).toBe(`${team}/cdn-cgi/access/logout`);
+    } finally {
+      await worker.stop();
+      await rm(directory, {force: true, recursive: true});
+    }
+  }, 120_000);
+
   it("starts generic OIDC login from a path-based issuer", async () => {
     const directory = await mkdtemp(join(tmpdir(), "artifact-server-oidc-"));
     const worker = await startWorker(directory, {
@@ -125,6 +183,11 @@ describe("Cloudflare Worker browser-login provider", () => {
 
 function startDiscoveryStub(): Promise<Server> {
   const server = createServer((request, response) => {
+    if (request.url === "/cdn-cgi/access/certs") {
+      response.writeHead(200, {"content-type": "application/json"});
+      response.end(JSON.stringify({keys: [accessJwk]}));
+      return;
+    }
     const issuerPath = `/cdn-cgi/access/sso/oidc/${clientId}`;
     if (request.url !== `${issuerPath}/.well-known/openid-configuration`) {
       response.writeHead(404).end();

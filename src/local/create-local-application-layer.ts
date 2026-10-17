@@ -143,6 +143,8 @@ import type {
 /** Concrete Node adapters reused by the Effect application layer. */
 export interface ApplicationAdapters {
   readonly apiToken: Redacted.Redacted | null;
+  /** When true, verified OIDC users with no member record are auto-admitted. */
+  readonly autoAdmitExternalMembers?: boolean;
   readonly blobs: BlobStore;
   readonly bootstrapAdministratorEmail: string;
   readonly clock: Clock;
@@ -758,6 +760,7 @@ export function createApplicationLayer(
   };
   const identityRepository = adapters.identityRepository;
   const identityLayer = InstallationAccessService.layer({
+    autoAdmitExternalMembers: adapters.autoAdmitExternalMembers ?? false,
     bootstrapAdministratorEmail: adapters.bootstrapAdministratorEmail,
     clock: adapters.clock,
     ids: {
@@ -811,6 +814,10 @@ export function createApplicationLayer(
       findActiveMemberByEmail: (installationId, email) => identityEffect(
         "findActiveMemberByEmail",
         () => identityRepository.findActiveMemberByEmail(installationId, email),
+      ),
+      findMemberByEmail: (installationId, email) => identityEffect(
+        "findMemberByEmail",
+        () => identityRepository.findMemberByEmail(installationId, email),
       ),
       findActiveMemberByExternalIdentity: (
         installationId,

@@ -227,6 +227,26 @@ export class SqliteIdentityRepository implements BootstrapManagedApiKeyRepositor
     return row === undefined ? null : memberRowSchema.parse(row);
   }
 
+  async findMemberByEmail(
+    installationId: string,
+    email: string,
+  ): Promise<InstallationMember | null> {
+    const row = this.#database.prepare(`
+      SELECT
+        id,
+        installation_id AS installationId,
+        email,
+        display_name AS displayName,
+        role,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM installation_members
+      WHERE installation_id = ? AND email = ?
+    `).get(installationId, email);
+    return row === undefined ? null : memberRowSchema.parse(row);
+  }
+
   async findActiveMemberByExternalIdentity(
     installationId: string,
     provider: string,

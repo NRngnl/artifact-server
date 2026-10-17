@@ -59,6 +59,11 @@ export interface IdentityRepository {
     installationId: string,
     email: string,
   ): Promise<InstallationMember | null>;
+  /** Find a member by email regardless of status (active or inactive). */
+  findMemberByEmail(
+    installationId: string,
+    email: string,
+  ): Promise<InstallationMember | null>;
   findActiveMemberByExternalIdentity(
     installationId: string,
     provider: string,

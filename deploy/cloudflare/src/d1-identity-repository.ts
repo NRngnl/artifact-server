@@ -389,6 +389,14 @@ export function createD1IdentityRepository(
       return row === null ? null : memberRowSchema.parse(row);
     },
 
+    findMemberByEmail: async (installationId, email) => {
+      const row = await database.prepare(`${memberSelect}
+        WHERE installation_id = ? AND email = ?
+      `).bind(installationId, email)
+        .first<z.input<typeof memberRowSchema>>();
+      return row === null ? null : memberRowSchema.parse(row);
+    },
+
     findActiveMemberByExternalIdentity: async (
       installationId,
       provider,

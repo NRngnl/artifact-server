@@ -8,6 +8,7 @@ export const browserAccessModes = {
 export const browserLoginKinds = {
   localOwner: "local_owner",
   oidc: "oidc",
+  cloudflareAccess: "cloudflare_access",
   workOs: "workos",
 } as const;
 
@@ -26,6 +27,7 @@ export type BrowserAccess =
   | {
     readonly loginKind:
       | typeof browserLoginKinds.oidc
+      | typeof browserLoginKinds.cloudflareAccess
       | typeof browserLoginKinds.workOs;
     readonly mode: typeof browserAccessModes.privateTeam;
   };
@@ -40,6 +42,7 @@ export const localOwnerBrowserAccess: BrowserAccess = {
 export function privateTeamBrowserAccess(
   loginKind:
     | typeof browserLoginKinds.oidc
+    | typeof browserLoginKinds.cloudflareAccess
     | typeof browserLoginKinds.workOs,
 ): Extract<BrowserAccess, {readonly mode: "private_team"}> {
   return {loginKind, mode: browserAccessModes.privateTeam};

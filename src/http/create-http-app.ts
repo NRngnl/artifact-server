@@ -146,6 +146,9 @@ import {
 } from "./artifact-http-links.js";
 import {artifactServerFailureResponse} from "./artifact-http-failure.js";
 import {attachmentContentDisposition} from "./content-disposition.js";
+import {contentTokenCharacterLimit} from "../core/content-host-policy.js";
+import {contentHostCspSources, contentHostSuffix, isUnassignedContentHostname, tokenFromContentHostname} from "./content-host.js";
+import {permitsBrowserSessionChange, trustedBrowserLoginMiddleware, type TrustedBrowserLogin} from "./trusted-browser-login.js";
 import {observeHttpRequest} from "../observability/application-observability.js";
 import {
   createVersionArchive,
@@ -457,7 +460,7 @@ const maximumClaimWaitSeconds = 25;
 /** Spacing of the bounded re-checks inside one held claim poll. */
 const claimRecheckIntervalMilliseconds = 1_000;
 
-interface HttpEnvironment {
+export interface HttpEnvironment {
   readonly Variables: {
     readonly authenticationMethod: "bearer" | "session";
     readonly principal: Principal;
@@ -469,6 +472,7 @@ interface HttpEnvironment {
 }
 
 export interface HttpAppDependencies {
+  readonly trustedBrowserLogin?: TrustedBrowserLogin;
   readonly apiOAuthResource?: ApiOAuthResourceConfiguration;
   readonly applicationRuntime: ApplicationRuntime;
   readonly blobs: BlobStore;
@@ -476,6 +480,7 @@ export interface HttpAppDependencies {
   readonly browserAccess: BrowserAccess;
   readonly completedRequestLogSampleRate: number;
   readonly contentDomain: string;
+  readonly contentHostSuffix?: string;
   /** Server-only credential accepted from the co-launched Vite proxy. */
   readonly developmentProxyCredential?: Redacted.Redacted;
   /** Secret-free optional Git state exposed through authenticated discovery. */
@@ -535,8 +540,11 @@ export interface WebAssetStore {
 }
 
 export function createHttpApp(
-  dependencies: HttpAppDependencies,
+  configuration: HttpAppDependencies,
 ): Hono<HttpEnvironment> {
+  // Legacy link callers accept a pre-composed suffix, avoiding per-call changes.
+  const dependencies = {...configuration,
+    contentDomain: contentHostSuffix(configuration.contentDomain, configuration.contentHostSuffix)};
   const app = new Hono<HttpEnvironment>();
   const applicationHostname = dependencies.trustedApplicationOrigin === null
     ? null
@@ -689,6 +697,16 @@ export function createHttpApp(
       }
     }
   });
+
+  app.use("*", async (context, next) =>
+    isUnassignedContentHostname(new URL(context.req.url).hostname, dependencies.contentDomain, applicationHostname)
+      ? context.notFound() : next());
+
+  app.use("*", trustedBrowserLoginMiddleware(dependencies, {
+    clear: (context) => clearApplicationSessionCookies(context, dependencies),
+    issue: (context, issued) => setApplicationSessionCookies(context, dependencies, issued),
+    read: (context) => getCookie(context, applicationCookieNames(dependencies).session),
+  }));
 
   app.use("*", async (context, next) => {
     const requestUrl = new URL(context.req.url);
@@ -1022,6 +1040,20 @@ export function createHttpApp(
       },
       principal: context.get("principal"),
     }));
+
+  app.get("/auth/logout", async (context) => {
+    if (!permitsBrowserSessionChange(context.req.raw)) {
+      throw new AuthenticationRequired({message: "Sign out from the application origin."});
+    }
+    const credential = getCookie(context, applicationCookieNames(dependencies).session);
+    if (credential !== undefined) {
+      await runHttpApplicationEffect(context, dependencies,
+        InstallationAccessService.use((access) => access.revokeSession(Redacted.make(credential))),
+      );
+    }
+    clearApplicationSessionCookies(context, dependencies);
+    return context.redirect(dependencies.trustedBrowserLogin?.logoutUrl ?? "/review", 303);
+  });
 
   app.post("/api/v1/session/logout", async (context) => {
     const sessionToken = context.get("sessionToken");
@@ -2316,6 +2348,7 @@ export function createHttpApp(
         dependencies,
         ContentAccessService.use((contentAccess) =>
           contentAccess.issuePreviewLease({
+            tokenCharacterLimit: contentTokenCharacterLimit(dependencies.contentDomain),
             artifactId: context.req.param("artifactId"),
             principal: context.get("principal"),
             projectId: requestedProjectId(context),
@@ -3990,12 +4023,12 @@ function tokenFromContentHost(
   hostname: string,
   contentDomain: string,
 ): string | null {
-  const suffix = `.${contentDomain.toLocaleLowerCase("en-US")}`;
+  const suffix = contentHostSuffix(contentDomain);
   const normalizedHostname = hostname.toLocaleLowerCase("en-US");
   if (!normalizedHostname.endsWith(suffix)) return null;
   const candidate = normalizedHostname.slice(0, -suffix.length);
   const parsed = contentTokenSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
+  return parsed.success ? tokenFromContentHostname(normalizedHostname, suffix) : null;
 }
 
 function isContentBootstrapRequest(requestUrl: URL): boolean {
@@ -4008,10 +4041,8 @@ function isContentBootstrapRequest(requestUrl: URL): boolean {
  * host, so the inherited policy permits network access only to configured
  * content hosts. The frame still cannot reach the trusted application origin.
  */
-function reviewFrameContentSecurityPolicy(contentDomain: string): string {
-  const httpContent = `http://*.${contentDomain}:*`;
-  const httpsContent = `https://*.${contentDomain}`;
-  const contentSources = `${httpContent} ${httpsContent}`;
+function reviewFrameContentSecurityPolicy(contentDomain: string, requestUrl: URL): string {
+  const contentSources = contentHostCspSources(contentHostSuffix(contentDomain), requestUrl);
   return [
     "default-src 'none'",
     `script-src 'self' 'unsafe-inline' ${contentSources}`,
@@ -4045,7 +4076,7 @@ async function serveWebAsset(
       ? "public, max-age=31536000, immutable"
       : "no-cache, must-revalidate",
     "Content-Security-Policy": kind === "review-frame"
-      ? reviewFrameContentSecurityPolicy(dependencies.contentDomain)
+      ? reviewFrameContentSecurityPolicy(dependencies.contentDomain, new URL(context.req.url))
       : "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
